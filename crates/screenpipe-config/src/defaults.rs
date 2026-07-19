@@ -72,15 +72,9 @@ pub fn detect_tier() -> DeviceTier {
     sys.refresh_memory();
 
     let ram_gb = sys.total_memory() / (1024 * 1024 * 1024);
-    let cores = sys.cpus().len() as u64;
-
-    // Re-query CPU count via sysinfo's physical core count if cpus() is empty
-    // (can happen before refresh_cpu)
-    let cores = if cores == 0 {
-        sys.physical_core_count().unwrap_or(1) as u64
-    } else {
-        cores
-    };
+    let cores = std::thread::available_parallelism()
+        .map(|n| n.get() as u64)
+        .unwrap_or_else(|_| sys.physical_core_count().unwrap_or(1) as u64);
 
     classify_tier(ram_gb, cores)
 }
@@ -289,17 +283,22 @@ pub fn best_engine_for_platform(tier: DeviceTier) -> &'static str {
 /// Returns true if the given engine string is unsafe for the current platform.
 ///
 /// An engine is unsafe if:
-/// - It's parakeet/parakeet-mlx on a Low-tier device (OOM crash)
-/// - It's parakeet/parakeet-mlx on macOS < 26 (segfault during Metal init)
-/// - It's parakeet/parakeet-mlx on a non-macOS platform (no MLX support)
+/// - It's parakeet/parakeet-mlx on a Low/Mid-tier device (OOM / too heavy)
+/// - It's parakeet-mlx on macOS < 26 (segfault during Metal init)
+/// - It's parakeet-mlx on a non-macOS platform (MLX/Metal only)
 pub fn is_engine_unsafe(engine: &str, tier: DeviceTier) -> bool {
-    let is_parakeet = engine == "parakeet" || engine == "parakeet-mlx";
+    let is_parakeet_mlx = engine == "parakeet-mlx";
+    let is_parakeet = engine == "parakeet" || is_parakeet_mlx;
     if !is_parakeet {
         return false;
     }
 
     if tier == DeviceTier::Low || tier == DeviceTier::Mid {
         return true;
+    }
+
+    if !is_parakeet_mlx {
+        return false;
     }
 
     let macos_ok = macos_major_version()
@@ -421,13 +420,48 @@ mod tests {
     }
 
     #[test]
+    fn parakeet_ort_backend_safe_on_high_tier_any_platform() {
+        assert!(!is_engine_unsafe("parakeet", DeviceTier::High));
+    }
+
+    #[test]
+    fn parakeet_mlx_unsafe_on_non_macos() {
+        if !cfg!(target_os = "macos") {
+            assert!(is_engine_unsafe("parakeet-mlx", DeviceTier::High));
+        }
+    }
+
+    #[test]
+    fn best_engine_high_tier_is_parakeet_on_non_macos() {
+        if !cfg!(target_os = "macos") {
+            assert_eq!(best_engine_for_platform(DeviceTier::High), "parakeet");
+        }
+    }
+
+    #[test]
     fn detect_tier_returns_valid_tier() {
         let tier = detect_tier();
-        // Just verify it doesn't panic and returns a valid tier
         assert!(matches!(
             tier,
             DeviceTier::High | DeviceTier::Mid | DeviceTier::Low
         ));
+    }
+
+    #[test]
+    fn detect_tier_uses_available_parallelism_for_cores() {
+        let mut sys = System::new();
+        sys.refresh_memory();
+        let ram_gb = sys.total_memory() / (1024 * 1024 * 1024);
+        let cores = std::thread::available_parallelism()
+            .map(|n| n.get() as u64)
+            .unwrap_or(1);
+        if ram_gb >= 24 && cores >= 8 {
+            assert_eq!(
+                detect_tier(),
+                DeviceTier::High,
+                "expected High for {ram_gb} GB RAM / {cores} cores"
+            );
+        }
     }
 
     // ── classify_tier boundary tests ──────────────────────────────────
