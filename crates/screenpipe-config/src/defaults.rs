@@ -284,9 +284,24 @@ pub fn best_engine_for_platform(tier: DeviceTier) -> &'static str {
 ///
 /// An engine is unsafe if:
 /// - It's parakeet/parakeet-mlx on a Low/Mid-tier device (OOM / too heavy)
-/// - It's parakeet-mlx on macOS < 26 (segfault during Metal init)
-/// - It's parakeet-mlx on a non-macOS platform (MLX/Metal only)
+/// - On macOS: either string on macOS < 26 (plain `parakeet` auto-upgrades to
+///   the MLX runtime when `parakeet-mlx` is compiled in — Metal init segfaults)
+/// - On non-macOS: only `parakeet-mlx` (MLX/Metal only; ORT `parakeet` is fine)
 pub fn is_engine_unsafe(engine: &str, tier: DeviceTier) -> bool {
+    is_engine_unsafe_for(
+        engine,
+        tier,
+        cfg!(target_os = "macos"),
+        macos_major_version(),
+    )
+}
+
+fn is_engine_unsafe_for(
+    engine: &str,
+    tier: DeviceTier,
+    is_macos: bool,
+    macos_major: Option<u32>,
+) -> bool {
     let is_parakeet_mlx = engine == "parakeet-mlx";
     let is_parakeet = engine == "parakeet" || is_parakeet_mlx;
     if !is_parakeet {
@@ -297,15 +312,14 @@ pub fn is_engine_unsafe(engine: &str, tier: DeviceTier) -> bool {
         return true;
     }
 
-    if !is_parakeet_mlx {
-        return false;
+    if is_macos {
+        let macos_ok = macos_major
+            .map(|v| v >= PARAKEET_MIN_MACOS_MAJOR)
+            .unwrap_or(false);
+        !macos_ok
+    } else {
+        is_parakeet_mlx
     }
-
-    let macos_ok = macos_major_version()
-        .map(|v| v >= PARAKEET_MIN_MACOS_MAJOR)
-        .unwrap_or(false);
-
-    !macos_ok
 }
 
 /// Apply platform-specific defaults to a `RecordingSettings`.
@@ -420,14 +434,20 @@ mod tests {
     }
 
     #[test]
-    fn parakeet_ort_backend_safe_on_high_tier_any_platform() {
-        assert!(!is_engine_unsafe("parakeet", DeviceTier::High));
-    }
-
-    #[test]
-    fn parakeet_mlx_unsafe_on_non_macos() {
-        if !cfg!(target_os = "macos") {
-            assert!(is_engine_unsafe("parakeet-mlx", DeviceTier::High));
+    fn parakeet_high_tier_safety_matrix() {
+        for (engine, is_macos, macos_major, unsafe_) in [
+            ("parakeet", false, None, false),
+            ("parakeet-mlx", false, None, true),
+            ("parakeet", true, Some(15), true),
+            ("parakeet-mlx", true, Some(15), true),
+            ("parakeet", true, Some(26), false),
+            ("parakeet-mlx", true, Some(26), false),
+            ("parakeet", true, None, true),
+        ] {
+            assert_eq!(
+                is_engine_unsafe_for(engine, DeviceTier::High, is_macos, macos_major),
+                unsafe_
+            );
         }
     }
 
